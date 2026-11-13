@@ -60,6 +60,105 @@ const DUMMY_DATABASE: Record<string, ProductItem> = {
       notes: "Stok habis. Cek supplier komponen elektronik.",
       updatedAt: "10 Nov 2026",
    },
+   "8996001300219": {
+      barcode: "8996001300219",
+      name: "Teh Melati Botol 350ml",
+      category: "Minuman",
+      stock: 36,
+      price: 5000,
+      notes: "Tersimpan di chiller display depan.",
+      updatedAt: "Hari ini, 09:10",
+   },
+   "8991002101122": {
+      barcode: "8991002101122",
+      name: "Biskuit Gandum Cokelat 110g",
+      category: "Makanan Ringan",
+      stock: 22,
+      price: 9500,
+      notes: "Expired date Maret 2027, rak B2.",
+      updatedAt: "Hari ini, 07:45",
+   },
+   "8992753101106": {
+      barcode: "8992753101106",
+      name: "Susu UHT Full Cream 250ml",
+      category: "Minuman",
+      stock: 3,
+      price: 7500,
+      notes: "Sisa 3 kotak, butuh restock mingguan.",
+      updatedAt: "Kemarin, 18:20",
+   },
+   "INV-2026-002": {
+      barcode: "INV-2026-002",
+      name: "Switch Gigabit 24-Port Managed",
+      category: "Perangkat Jaringan",
+      stock: 5,
+      price: 2850000,
+      notes: "Cadangan rack server lantai 2.",
+      updatedAt: "11 Nov 2026",
+   },
+   "INV-2026-003": {
+      barcode: "INV-2026-003",
+      name: "Kabel Patch Cord Cat6 3 Meter",
+      category: "Perangkat Jaringan",
+      stock: 65,
+      price: 35000,
+      notes: "Warna biru, stok melimpah di boks kabel.",
+      updatedAt: "09 Nov 2026",
+   },
+   "LAB-ESP-32": {
+      barcode: "LAB-ESP-32",
+      name: "Mikrokontroler ESP32-S3 DevKit",
+      category: "Komponen IoT",
+      stock: 18,
+      price: 115000,
+      notes: "Digunakan untuk praktikum modul Wi-Fi & BLE.",
+      updatedAt: "Hari ini, 10:05",
+   },
+   "LAB-RFID-01": {
+      barcode: "LAB-RFID-01",
+      name: "Sensor RFID RC522 + Kartu Tag",
+      category: "Komponen IoT",
+      stock: 2,
+      price: 28000,
+      notes: "Stok kritis, tersisa 2 set di lemari lab.",
+      updatedAt: "08 Nov 2026",
+   },
+   "ATK-HVS-A4": {
+      barcode: "ATK-HVS-A4",
+      name: "Kertas HVS A4 80gsm (1 Rim)",
+      category: "Alat Tulis Kantor",
+      stock: 30,
+      price: 54000,
+      notes: "Rak logistik administrasi ruangan TU.",
+      updatedAt: "Kemarin, 14:00",
+   },
+   "ATK-SP-09": {
+      barcode: "ATK-SP-09",
+      name: "Spidol Whiteboard Hitam",
+      category: "Alat Tulis Kantor",
+      stock: 0,
+      price: 9000,
+      notes: "Habis terpakai, sedang proses pengajuan pembelian.",
+      updatedAt: "07 Nov 2026",
+   },
+   "8999999501233": {
+      barcode: "8999999501233",
+      name: "Hand Sanitizer Gel 100ml",
+      category: "Kesehatan & Kebersihan",
+      stock: 19,
+      price: 14000,
+      notes: "Stok standar ruang kelas & lab komputer.",
+      updatedAt: "12 Nov 2026",
+   },
+   "8993175534217": {
+      barcode: "8993175534217",
+      name: "Wafer Krim Vanila 140g",
+      category: "Makanan Ringan",
+      stock: 14,
+      price: 8500,
+      notes: "Rak display koperasi bagian tengah.",
+      updatedAt: "Hari ini, 08:50",
+   },
 };
 
 type ActiveTab = "scanner" | "generator" | "catalog" | "guide";
@@ -72,6 +171,14 @@ const FORMAT_PROFILES: Record<ScanProfile, ("ean_13" | "ean_8" | "code_128" | "c
    ALL: ["ean_13", "code_128", "qr_code", "upc_a", "ean_8", "code_39"],
 };
 
+const isValidEan13 = (code: string) => {
+   if (!/^\d{13}$/.test(code)) return false;
+   const digits = code.split("").map(Number);
+   const sum = digits.slice(0, 12).reduce((acc, d, idx) => acc + d * (idx % 2 === 0 ? 1 : 3), 0);
+   const checkDigit = (10 - (sum % 10)) % 10;
+   return checkDigit === digits[12];
+};
+
 function BarcodeCanvas({ value, format = "code128", scale = 3, height = 13, compact = false }: { value: string; format?: GeneratorFormat; scale?: number; height?: number; compact?: boolean }) {
    const canvasRef = useRef<HTMLCanvasElement | null>(null);
    const [renderError, setRenderError] = useState<string>("");
@@ -80,21 +187,38 @@ function BarcodeCanvas({ value, format = "code128", scale = 3, height = 13, comp
       if (!canvasRef.current || !value.trim()) return;
       setRenderError("");
 
+      const trimmedValue = value.trim();
+      const resolvedFormat: GeneratorFormat = format === "ean13" && !isValidEan13(trimmedValue) ? "code128" : format;
+
       try {
          bwipjs.toCanvas(canvasRef.current, {
-            bcid: format,
-            text: value.trim(),
+            bcid: resolvedFormat,
+            text: trimmedValue,
             scale,
-            height: format === "qrcode" ? 32 : height,
-            includetext: format !== "qrcode",
+            height: resolvedFormat === "qrcode" ? 32 : height,
+            includetext: resolvedFormat !== "qrcode",
             textxalign: "center",
             backgroundcolor: "FFFFFF",
             paddingwidth: compact ? 4 : 8,
             paddingheight: compact ? 3 : 6,
          });
-      } catch (err) {
-         const msg = err instanceof Error ? err.message : "Format kode tidak valid";
-         setRenderError(msg);
+      } catch {
+         try {
+            bwipjs.toCanvas(canvasRef.current, {
+               bcid: "code128",
+               text: trimmedValue,
+               scale,
+               height,
+               includetext: true,
+               textxalign: "center",
+               backgroundcolor: "FFFFFF",
+               paddingwidth: compact ? 4 : 8,
+               paddingheight: compact ? 3 : 6,
+            });
+         } catch (fallbackErr) {
+            const msg = fallbackErr instanceof Error ? fallbackErr.message : "Format kode tidak valid";
+            setRenderError(msg);
+         }
       }
    }, [value, format, scale, height, compact]);
 
@@ -173,7 +297,7 @@ export default function BarcodeCVLab() {
       setActiveTab("scanner");
       setTelemetry({
          rawValue: code,
-         format: code.startsWith("899") ? "EAN-13" : "CODE-128",
+         format: isValidEan13(code) ? "EAN-13" : "CODE-128",
          inferenceMs: "0.42",
          box: { x: 120, y: 80, width: 320, height: 140 },
          source: "SIMULATION",
@@ -340,7 +464,7 @@ export default function BarcodeCVLab() {
 
    const selectPresetForGenerator = (code: string) => {
       setGenInput(code);
-      setGenFormat(/^\d{13}$/.test(code) ? "ean13" : "code128");
+      setGenFormat(isValidEan13(code) ? "ean13" : "code128");
    };
 
    return (
@@ -651,7 +775,7 @@ export default function BarcodeCVLab() {
                            <div className="space-y-1.5">
                               <label className="text-xs font-semibold text-slate-700">Nilai / Teks Barcode</label>
                               <input type="text" value={genInput} onChange={e => setGenInput(e.target.value)} placeholder="Masukkan angka atau kode..." className="w-full px-4 py-2.5 bg-[#F6F7F9] border border-slate-200 rounded-xl text-sm font-mono text-[#181920] focus:outline-none focus:border-[#5B5BD6]" />
-                              <p className="text-[11px] text-slate-500">{genFormat === "ean13" ? "*EAN-13 membutuhkan tepat 12 atau 13 digit angka (contoh: 8992761136014)." : "*Code-128 & QR mendukung huruf, angka, dan tanda hubung (contoh: INV-2026-001)."}</p>
+                              <p className="text-[11px] text-slate-500">{genFormat === "ean13" ? "*EAN-13 membutuhkan tepat 13 digit angka valid (contoh: 8992761136014)." : "*Code-128 & QR mendukung huruf, angka, dan tanda hubung (contoh: INV-2026-001)."}</p>
                            </div>
 
                            <div className="space-y-1.5 pt-1">
@@ -699,7 +823,7 @@ export default function BarcodeCVLab() {
                               </div>
 
                               <div className="flex justify-center py-1">
-                                 <BarcodeCanvas value={item.barcode} format={/^\d{13}$/.test(item.barcode) ? "ean13" : "code128"} scale={2} height={9} compact />
+                                 <BarcodeCanvas value={item.barcode} format={isValidEan13(item.barcode) ? "ean13" : "code128"} scale={2} height={9} compact />
                               </div>
 
                               <div className="pt-2.5 border-t border-slate-200/80 flex items-center justify-between">
@@ -732,7 +856,7 @@ export default function BarcodeCVLab() {
                               {filteredProducts.map(item => (
                                  <tr key={item.barcode} className="hover:bg-slate-50/80 transition">
                                     <td className="py-3 px-3">
-                                       <BarcodeCanvas value={item.barcode} format={/^\d{13}$/.test(item.barcode) ? "ean13" : "code128"} scale={2} height={8} compact />
+                                       <BarcodeCanvas value={item.barcode} format={isValidEan13(item.barcode) ? "ean13" : "code128"} scale={2} height={8} compact />
                                     </td>
                                     <td className="py-3 px-3 font-medium text-[#181920]">{item.name}</td>
                                     <td className="py-3 px-3 text-slate-500">{item.category}</td>
