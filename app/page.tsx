@@ -2,7 +2,8 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { BarcodeDetector } from "barcode-detector/ponyfill";
-import { Camera, CameraOff, ScanBarcode, RotateCcw, CheckCircle2, AlertCircle, Package, Cpu, Clock, Layers, BookOpen, ArrowUpRight, Search } from "lucide-react";
+import bwipjs from "bwip-js";
+import { Camera, CameraOff, ScanBarcode, RotateCcw, CheckCircle2, AlertCircle, Package, Cpu, Clock, Layers, BookOpen, ArrowUpRight, Search, Download, QrCode } from "lucide-react";
 
 interface ProductItem {
    barcode: string;
@@ -61,14 +62,64 @@ const DUMMY_DATABASE: Record<string, ProductItem> = {
    },
 };
 
-type ActiveTab = "scanner" | "catalog" | "guide";
+type ActiveTab = "scanner" | "generator" | "catalog" | "guide";
 type ScanProfile = "1D_PRODUCT" | "QR_ONLY" | "ALL";
+type GeneratorFormat = "code128" | "ean13" | "qrcode";
 
 const FORMAT_PROFILES: Record<ScanProfile, ("ean_13" | "ean_8" | "code_128" | "code_39" | "qr_code" | "upc_a")[]> = {
    "1D_PRODUCT": ["ean_13", "code_128", "upc_a", "ean_8"],
    QR_ONLY: ["qr_code"],
    ALL: ["ean_13", "code_128", "qr_code", "upc_a", "ean_8", "code_39"],
 };
+
+function BarcodeCanvas({ value, format = "code128", scale = 3, height = 13 }: { value: string; format?: GeneratorFormat; scale?: number; height?: number }) {
+   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   const [renderError, setRenderError] = useState<string>("");
+
+   useEffect(() => {
+      if (!canvasRef.current || !value.trim()) return;
+      setRenderError("");
+
+      try {
+         bwipjs.toCanvas(canvasRef.current, {
+            bcid: format,
+            text: value.trim(),
+            scale,
+            height: format === "qrcode" ? 32 : height,
+            includetext: format !== "qrcode",
+            textxalign: "center",
+            backgroundcolor: "FFFFFF",
+            paddingwidth: 8,
+            paddingheight: 6,
+         });
+      } catch (err) {
+         const msg = err instanceof Error ? err.message : "Format kode tidak valid";
+         setRenderError(msg);
+      }
+   }, [value, format, scale, height]);
+
+   const handleDownload = () => {
+      if (!canvasRef.current) return;
+      const link = document.createElement("a");
+      link.download = `${format}-${value.trim()}.png`;
+      link.href = canvasRef.current.toDataURL("image/png");
+      link.click();
+   };
+
+   if (renderError) {
+      return <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-600 max-w-xs text-center">{renderError}</div>;
+   }
+
+   return (
+      <div className="inline-flex flex-col items-center bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
+         <canvas ref={canvasRef} className="max-w-full h-auto rounded" />
+         <button type="button" onClick={handleDownload} className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full text-[11px] font-semibold flex items-center gap-1.5 transition">
+            <Download className="w-3 h-3" />
+            Unduh PNG
+         </button>
+      </div>
+   );
+}
 
 export default function BarcodeCVLab() {
    const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -89,6 +140,10 @@ export default function BarcodeCVLab() {
    const [errorMsg, setErrorMsg] = useState<string>("");
    const [searchQuery, setSearchQuery] = useState<string>("");
 
+   // State Generator
+   const [genInput, setGenInput] = useState<string>("8992761136014");
+   const [genFormat, setGenFormat] = useState<GeneratorFormat>("ean13");
+
    useEffect(() => {
       const hasNative = typeof window !== "undefined" && "BarcodeDetector" in window;
       setEngineMode(hasNative ? "Native ML Kit" : "WASM Polyfill");
@@ -99,7 +154,6 @@ export default function BarcodeCVLab() {
       };
    }, []);
 
-   // Restart loop jika profil format diubah saat kamera sedang berjalan
    useEffect(() => {
       if (isScanning && !isLockedRef.current) {
          if (timerRef.current) clearTimeout(timerRef.current);
@@ -169,7 +223,6 @@ export default function BarcodeCVLab() {
             audio: false,
          });
 
-         // Aktifkan continuous autofocus jika perangkat mendukung
          const videoTrack = stream.getVideoTracks()[0];
          const capabilities = videoTrack.getCapabilities?.() as MediaTrackCapabilities & {
             focusMode?: string[];
@@ -219,14 +272,11 @@ export default function BarcodeCVLab() {
             overlayCanvas.height = vh;
             overlayCtx.clearRect(0, 0, vw, vh);
 
-            // Potong area fokus di tengah (ROI: 75% lebar x 55% tinggi)
-            // Mempercepat inferensi ~3-4x lipat dan mencegah salah baca objek pinggir layar
             const roiW = Math.round(vw * 0.75);
             const roiH = Math.round(vh * 0.55);
             const roiX = Math.round((vw - roiW) / 2);
             const roiY = Math.round((vh - roiH) / 2);
 
-            // Skala crop ke lebar maksimal 640px agar ZXing WASM bekerja sangat cepat & tajam
             const targetW = Math.min(roiW, 640);
             const scale = targetW / roiW;
             const targetH = Math.round(roiH * scale);
@@ -244,36 +294,27 @@ export default function BarcodeCVLab() {
                   const code = barcodes[0];
                   const cleanValue = code.rawValue.trim();
 
-                  // Konfirmasi konsistensi 2 frame berturut-turut untuk mencegah salah baca
                   if (lastCandidateRef.current.value === cleanValue) {
                      lastCandidateRef.current.count += 1;
                   } else {
                      lastCandidateRef.current = { value: cleanValue, count: 1 };
                   }
 
-                  // Kembalikan koordinat bounding box dari cropCanvas ke koordinat asli video
                   const boxX = Math.round(roiX + code.boundingBox.x / scale);
                   const boxY = Math.round(roiY + code.boundingBox.y / scale);
                   const boxW = Math.round(code.boundingBox.width / scale);
                   const boxH = Math.round(code.boundingBox.height / scale);
 
-                  // Gambar Bounding Box
                   overlayCtx.strokeStyle = lastCandidateRef.current.count >= 2 ? "#10B981" : "#F59E0B";
                   overlayCtx.lineWidth = 4;
                   overlayCtx.strokeRect(boxX, boxY, boxW, boxH);
 
-                  // Kunci hanya jika sudah terverifikasi 2 frame identik
                   if (lastCandidateRef.current.count >= 2) {
                      setTelemetry({
                         rawValue: cleanValue,
                         format: code.format.toUpperCase().replace("_", "-"),
                         inferenceMs: (t1 - t0).toFixed(2),
-                        box: {
-                           x: boxX,
-                           y: boxY,
-                           width: boxW,
-                           height: boxH,
-                        },
+                        box: { x: boxX, y: boxY, width: boxW, height: boxH },
                         source: "CAMERA",
                      });
 
@@ -290,7 +331,6 @@ export default function BarcodeCVLab() {
             }
          }
 
-         // Interval 80ms (~12.5 FPS) karena ROI sudah ringan
          timerRef.current = setTimeout(scanFrame, 80);
       };
 
@@ -298,6 +338,11 @@ export default function BarcodeCVLab() {
    };
 
    const filteredProducts = Object.values(DUMMY_DATABASE).filter(item => item.name.toLowerCase().includes(searchQuery.toLowerCase()) || item.barcode.toLowerCase().includes(searchQuery.toLowerCase()) || item.category.toLowerCase().includes(searchQuery.toLowerCase()));
+
+   const selectPresetForGenerator = (code: string) => {
+      setGenInput(code);
+      setGenFormat(/^\d{13}$/.test(code) ? "ean13" : "code128");
+   };
 
    return (
       <div className="min-h-screen bg-[#F6F7F9] text-[#181920] p-4 sm:p-6 md:p-8 font-sans antialiased">
@@ -318,6 +363,9 @@ export default function BarcodeCVLab() {
                <nav className="flex items-center bg-[#1E1F29] p-1.5 rounded-full shadow-sm">
                   <button onClick={() => setActiveTab("scanner")} className={`px-4 py-1.5 rounded-full text-xs font-medium transition-all ${activeTab === "scanner" ? "bg-[#5B5BD6] text-white shadow-sm" : "text-slate-300 hover:text-white"}`}>
                      Pemindai
+                  </button>
+                  <button onClick={() => setActiveTab("generator")} className={`px-4 py-1.5 rounded-full text-xs font-medium transition-all ${activeTab === "generator" ? "bg-[#5B5BD6] text-white shadow-sm" : "text-slate-300 hover:text-white"}`}>
+                     Generator
                   </button>
                   <button onClick={() => setActiveTab("catalog")} className={`px-4 py-1.5 rounded-full text-xs font-medium transition-all ${activeTab === "catalog" ? "bg-[#5B5BD6] text-white shadow-sm" : "text-slate-300 hover:text-white"}`}>
                      Katalog ({Object.keys(DUMMY_DATABASE).length})
@@ -340,11 +388,10 @@ export default function BarcodeCVLab() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-1">
                <div>
                   <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-[#181920]">Pemindaian Inventaris</h1>
-                  <p className="text-xs sm:text-sm text-slate-500 mt-0.5">Arahkan barcode ke dalam kotak bidik di tengah kamera untuk verifikasi otomatis.</p>
+                  <p className="text-xs sm:text-sm text-slate-500 mt-0.5">Deteksi &amp; pembuatan barcode lokal berbasis Canvas tanpa ketergantungan server.</p>
                </div>
 
                <div className="flex items-center gap-2.5 flex-wrap">
-                  {/* Format Mode Selector */}
                   <div className="flex items-center bg-white border border-slate-200 rounded-full p-1">
                      {(
                         [
@@ -465,19 +512,16 @@ export default function BarcodeCVLab() {
             {activeTab === "scanner" && (
                <section className="bg-[#1E1F29] rounded-[28px] p-4 sm:p-6 text-white shadow-sm">
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
-                     {/* Left Column: Camera Viewport + Quick List */}
                      <div className="lg:col-span-5 flex flex-col justify-between space-y-4">
                         <div className="flex items-center justify-between">
                            <span className="text-sm font-semibold text-white">Viewport Kamera</span>
                            <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium ${isLocked ? "bg-emerald-500/20 text-emerald-300" : isScanning ? "bg-[#5B5BD6]/30 text-indigo-200" : "bg-white/10 text-slate-300"}`}>{isLocked ? "Terkunci" : isScanning ? "Memindai..." : "Standby"}</span>
                         </div>
 
-                        {/* Camera Frame with Target ROI Reticle */}
                         <div className="relative w-full aspect-video bg-[#14151C] rounded-2xl overflow-hidden border border-white/10 flex items-center justify-center">
                            <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
                            <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
 
-                           {/* Target Guide Box (ROI 75% x 55%) */}
                            {isScanning && !isLocked && (
                               <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                                  <div className="w-[75%] h-[55%] border-2 border-dashed border-white/60 rounded-xl relative flex items-end justify-center pb-2">
@@ -491,7 +535,7 @@ export default function BarcodeCVLab() {
                                  <div className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mb-2.5">
                                     <Camera className="w-4 h-4 text-slate-300" />
                                  </div>
-                                 <p className="text-xs text-slate-300 max-w-[220px]">Nyalakan kamera untuk memindai barcode fisik atau layar perangkat lain.</p>
+                                 <p className="text-xs text-slate-300 max-w-[220px]">Nyalakan kamera untuk memindai barcode fisik atau hasil dari tab Generator.</p>
                                  <button onClick={startCamera} className="mt-3 px-4 py-1.5 bg-[#5B5BD6] hover:bg-[#4F4FC4] text-white text-xs font-medium rounded-full transition">
                                     Mulai Kamera
                                  </button>
@@ -506,7 +550,6 @@ export default function BarcodeCVLab() {
                            )}
                         </div>
 
-                        {/* Compact Item List */}
                         <div className="space-y-2 pt-1">
                            <div className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Daftar Kode Terdaftar</div>
                            <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
@@ -526,7 +569,6 @@ export default function BarcodeCVLab() {
                         </div>
                      </div>
 
-                     {/* Right Column: Indigo Inspection Detail Card */}
                      <div className="lg:col-span-7 bg-[#5B5BD6] rounded-2xl p-5 sm:p-6 flex flex-col justify-between text-white">
                         {telemetry ? (
                            <>
@@ -615,7 +657,9 @@ export default function BarcodeCVLab() {
                                  <ScanBarcode className="w-6 h-6 text-white" />
                               </div>
                               <div className="text-lg font-bold">Menunggu Input Barcode</div>
-                              <p className="text-xs text-indigo-100 max-w-sm leading-relaxed">Sejajarkan garis barcode secara horizontal di dalam kotak bidik kamera, atau pilih salah satu kode dari daftar di sebelah kiri.</p>
+                              <p className="text-xs text-indigo-100 max-w-sm leading-relaxed">
+                                 Sejajarkan garis barcode secara horizontal di dalam kotak bidik kamera, atau buka tab <strong>Generator</strong> untuk membuat barcode uji coba langsung di layar.
+                              </p>
                            </div>
                         )}
                      </div>
@@ -623,13 +667,81 @@ export default function BarcodeCVLab() {
                </section>
             )}
 
-            {/* TAB 2: CATALOG VIEW */}
+            {/* TAB 2: CANVAS BARCODE GENERATOR */}
+            {activeTab === "generator" && (
+               <section className="bg-white border border-slate-200/80 rounded-3xl p-5 sm:p-6">
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+                     {/* Left Form Controls */}
+                     <div className="lg:col-span-7 space-y-4">
+                        <div className="flex items-center gap-2.5">
+                           <div className="w-8 h-8 rounded-full bg-indigo-50 text-[#5B5BD6] flex items-center justify-center">
+                              <QrCode className="w-4 h-4" />
+                           </div>
+                           <div>
+                              <h2 className="text-base font-bold text-[#181920]">Generator Barcode Canvas</h2>
+                              <p className="text-xs text-slate-500">
+                                 Render barcode 1D/2D secara instan ke elemen <code>&lt;canvas&gt;</code> tanpa gambar eksternal.
+                              </p>
+                           </div>
+                        </div>
+
+                        {/* Format Selector */}
+                        <div className="space-y-1.5">
+                           <label className="text-xs font-semibold text-slate-700">Format Simbologi</label>
+                           <div className="flex flex-wrap gap-2">
+                              {(
+                                 [
+                                    { id: "ean13", label: "EAN-13 (13 Digit Angka)" },
+                                    { id: "code128", label: "Code-128 (Alfanumerik)" },
+                                    { id: "qrcode", label: "QR Code (2D)" },
+                                 ] as { id: GeneratorFormat; label: string }[]
+                              ).map(fmt => (
+                                 <button key={fmt.id} type="button" onClick={() => setGenFormat(fmt.id)} className={`px-3.5 py-2 rounded-xl text-xs font-semibold border transition ${genFormat === fmt.id ? "bg-[#5B5BD6] text-white border-[#5B5BD6]" : "bg-[#F6F7F9] text-slate-600 border-slate-200 hover:border-slate-300"}`}>
+                                    {fmt.label}
+                                 </button>
+                              ))}
+                           </div>
+                        </div>
+
+                        {/* Input Value */}
+                        <div className="space-y-1.5">
+                           <label className="text-xs font-semibold text-slate-700">Nilai / Teks Barcode</label>
+                           <input type="text" value={genInput} onChange={e => setGenInput(e.target.value)} placeholder="Masukkan angka atau kode..." className="w-full px-4 py-2.5 bg-[#F6F7F9] border border-slate-200 rounded-xl text-sm font-mono text-[#181920] focus:outline-none focus:border-[#5B5BD6]" />
+                           <p className="text-[11px] text-slate-500">{genFormat === "ean13" ? "*EAN-13 membutuhkan tepat 12 atau 13 digit angka (contoh: 8992761136014)." : "*Code-128 & QR mendukung huruf, angka, dan tanda hubung (contoh: INV-2026-001)."}</p>
+                        </div>
+
+                        {/* Preset Buttons from Dummy DB */}
+                        <div className="space-y-1.5 pt-1">
+                           <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Isi Cepat dari Database Lokal:</span>
+                           <div className="flex flex-wrap gap-2">
+                              {Object.values(DUMMY_DATABASE).map(item => (
+                                 <button key={item.barcode} type="button" onClick={() => selectPresetForGenerator(item.barcode)} className="px-3 py-1.5 bg-white hover:bg-indigo-50 border border-slate-200 hover:border-[#5B5BD6] rounded-full text-xs font-mono text-slate-700 transition">
+                                    {item.barcode}
+                                 </button>
+                              ))}
+                           </div>
+                        </div>
+                     </div>
+
+                     {/* Right Live Canvas Preview */}
+                     <div className="lg:col-span-5 bg-[#F6F7F9] border border-slate-200/80 rounded-2xl p-6 flex flex-col items-center justify-center min-h-[260px] space-y-3">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Live Canvas Render</span>
+                        {genInput.trim() ? <BarcodeCanvas value={genInput} format={genFormat} /> : <p className="text-xs text-slate-400 italic">Ketik kode di sebelah kiri untuk me-render canvas...</p>}
+                        <p className="text-[11px] text-slate-500 text-center max-w-xs">Arahkan kamera HP ke barcode di atas untuk menguji pemindaian secara langsung.</p>
+                     </div>
+                  </div>
+               </section>
+            )}
+
+            {/* TAB 3: CATALOG VIEW (Dengan Mini Canvas Preview) */}
             {activeTab === "catalog" && (
                <section className="bg-white border border-slate-200/80 rounded-3xl p-5 sm:p-6 space-y-4">
                   <div className="flex items-center justify-between">
                      <div>
                         <h2 className="text-base font-bold text-[#181920]">Katalog Produk Lokal</h2>
-                        <p className="text-xs text-slate-500">Klik baris item untuk mensimulasikan hasil pemindaian.</p>
+                        <p className="text-xs text-slate-500">
+                           Setiap produk dilengkapi render <code>&lt;canvas&gt;</code> barcode yang siap dipindai.
+                        </p>
                      </div>
                   </div>
 
@@ -637,7 +749,7 @@ export default function BarcodeCVLab() {
                      <table className="w-full text-left border-collapse">
                         <thead>
                            <tr className="border-b border-slate-100 text-[11px] font-semibold text-slate-400 uppercase">
-                              <th className="py-3 px-3">Kode Barcode</th>
+                              <th className="py-3 px-3">Barcode Canvas</th>
                               <th className="py-3 px-3">Nama Produk</th>
                               <th className="py-3 px-3">Kategori</th>
                               <th className="py-3 px-3">Harga</th>
@@ -648,7 +760,9 @@ export default function BarcodeCVLab() {
                         <tbody className="divide-y divide-slate-100 text-xs">
                            {filteredProducts.map(item => (
                               <tr key={item.barcode} className="hover:bg-slate-50/80 transition">
-                                 <td className="py-3 px-3 font-mono font-semibold text-[#5B5BD6]">{item.barcode}</td>
+                                 <td className="py-3 px-3">
+                                    <BarcodeCanvas value={item.barcode} format={/^\d{13}$/.test(item.barcode) ? "ean13" : "code128"} scale={2} height={8} />
+                                 </td>
                                  <td className="py-3 px-3 font-medium text-[#181920]">{item.name}</td>
                                  <td className="py-3 px-3 text-slate-500">{item.category}</td>
                                  <td className="py-3 px-3 font-medium">Rp {item.price.toLocaleString("id-ID")}</td>
@@ -656,7 +770,7 @@ export default function BarcodeCVLab() {
                                     <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium ${item.stock === 0 ? "bg-red-50 text-red-600" : item.stock <= 5 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{item.stock} unit</span>
                                  </td>
                                  <td className="py-3 px-3 text-right">
-                                    <button onClick={() => simulateScan(item.barcode)} className="px-3 py-1 bg-[#1E1F29] hover:bg-[#5B5BD6] text-white rounded-full text-[11px] font-medium transition">
+                                    <button onClick={() => simulateScan(item.barcode)} className="px-3 py-1.5 bg-[#1E1F29] hover:bg-[#5B5BD6] text-white rounded-full text-[11px] font-medium transition">
                                        Uji Scan
                                     </button>
                                  </td>
@@ -668,7 +782,7 @@ export default function BarcodeCVLab() {
                </section>
             )}
 
-            {/* TAB 3: USAGE GUIDE */}
+            {/* TAB 4: USAGE GUIDE */}
             {activeTab === "guide" && (
                <section className="bg-white border border-slate-200/80 rounded-3xl p-5 sm:p-6 space-y-5">
                   <div className="flex items-center gap-2.5">
@@ -683,9 +797,9 @@ export default function BarcodeCVLab() {
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                      <div className="p-4 rounded-2xl bg-[#F6F7F9] border border-slate-200/60 space-y-2">
-                        <div className="text-xs font-bold text-[#5B5BD6]">01. Pilih Jenis Kode</div>
+                        <div className="text-xs font-bold text-[#5B5BD6]">01. Generate Barcode Uji</div>
                         <p className="text-xs text-slate-600 leading-relaxed">
-                           Gunakan filter <strong>Barcode 1D</strong> untuk kode batang barang (EAN-13, Code-128) atau <strong>QR Code</strong> agar pembacaan jauh lebih cepat dan bebas salah tebak.
+                           Buka tab <strong>Generator</strong> di laptop untuk me-render barcode EAN-13, Code-128, atau QR Code secara lokal ke dalam elemen <code>&lt;canvas&gt;</code>.
                         </p>
                      </div>
 
