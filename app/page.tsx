@@ -62,15 +62,25 @@ const DUMMY_DATABASE: Record<string, ProductItem> = {
 };
 
 type ActiveTab = "scanner" | "catalog" | "guide";
+type ScanProfile = "1D_PRODUCT" | "QR_ONLY" | "ALL";
+
+const FORMAT_PROFILES: Record<ScanProfile, ("ean_13" | "ean_8" | "code_128" | "code_39" | "qr_code" | "upc_a")[]> = {
+   "1D_PRODUCT": ["ean_13", "code_128", "upc_a", "ean_8"],
+   QR_ONLY: ["qr_code"],
+   ALL: ["ean_13", "code_128", "qr_code", "upc_a", "ean_8", "code_39"],
+};
 
 export default function BarcodeCVLab() {
    const videoRef = useRef<HTMLVideoElement | null>(null);
    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
    const timerRef = useRef<NodeJS.Timeout | null>(null);
    const isLockedRef = useRef<boolean>(false);
    const streamRef = useRef<MediaStream | null>(null);
+   const lastCandidateRef = useRef<{ value: string; count: number }>({ value: "", count: 0 });
 
    const [activeTab, setActiveTab] = useState<ActiveTab>("scanner");
+   const [scanProfile, setScanProfile] = useState<ScanProfile>("1D_PRODUCT");
    const [engineMode, setEngineMode] = useState<string>("Memeriksa...");
    const [isScanning, setIsScanning] = useState<boolean>(false);
    const [isLocked, setIsLocked] = useState<boolean>(false);
@@ -82,14 +92,25 @@ export default function BarcodeCVLab() {
    useEffect(() => {
       const hasNative = typeof window !== "undefined" && "BarcodeDetector" in window;
       setEngineMode(hasNative ? "Native ML Kit" : "WASM Polyfill");
+      cropCanvasRef.current = document.createElement("canvas");
 
       return () => {
          stopCamera();
       };
    }, []);
 
+   // Restart loop jika profil format diubah saat kamera sedang berjalan
+   useEffect(() => {
+      if (isScanning && !isLockedRef.current) {
+         if (timerRef.current) clearTimeout(timerRef.current);
+         lastCandidateRef.current = { value: "", count: 0 };
+         detectLoop();
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [scanProfile]);
+
    const lookupDatabase = (code: string) => {
-      const found = DUMMY_DATABASE[code] || null;
+      const found = DUMMY_DATABASE[code.trim()] || null;
       setMatchedProduct(found);
    };
 
@@ -109,6 +130,7 @@ export default function BarcodeCVLab() {
 
    const resetScan = () => {
       isLockedRef.current = false;
+      lastCandidateRef.current = { value: "", count: 0 };
       setIsLocked(false);
       setTelemetry(null);
       setMatchedProduct(null);
@@ -139,14 +161,32 @@ export default function BarcodeCVLab() {
       setErrorMsg("");
       try {
          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
+            video: {
+               facingMode: { ideal: "environment" },
+               width: { ideal: 1280 },
+               height: { ideal: 720 },
+            },
+            audio: false,
          });
+
+         // Aktifkan continuous autofocus jika perangkat mendukung
+         const videoTrack = stream.getVideoTracks()[0];
+         const capabilities = videoTrack.getCapabilities?.() as MediaTrackCapabilities & {
+            focusMode?: string[];
+         };
+         if (capabilities?.focusMode?.includes("continuous")) {
+            await videoTrack.applyConstraints({
+               advanced: [{ focusMode: "continuous" } as MediaTrackConstraintSet],
+            });
+         }
+
          streamRef.current = stream;
          if (videoRef.current) {
             videoRef.current.srcObject = stream;
             await videoRef.current.play();
             setIsScanning(true);
             isLockedRef.current = false;
+            lastCandidateRef.current = { value: "", count: 0 };
             setIsLocked(false);
             setActiveTab("scanner");
             detectLoop();
@@ -157,73 +197,101 @@ export default function BarcodeCVLab() {
    };
 
    const detectLoop = async () => {
-      if (!videoRef.current || !canvasRef.current) return;
+      if (!videoRef.current || !canvasRef.current || !cropCanvasRef.current) return;
       const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d");
+      const overlayCanvas = canvasRef.current;
+      const overlayCtx = overlayCanvas.getContext("2d");
+      const cropCanvas = cropCanvasRef.current;
+      const cropCtx = cropCanvas.getContext("2d", { willReadFrequently: true });
 
       const detector = new BarcodeDetector({
-         formats: ["ean_13", "ean_8", "code_128", "code_39", "qr_code", "upc_a"],
+         formats: FORMAT_PROFILES[scanProfile],
       });
 
       const scanFrame = async () => {
          if (isLockedRef.current) return;
 
-         if (video.readyState === video.HAVE_ENOUGH_DATA && ctx) {
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+         if (video.readyState === video.HAVE_ENOUGH_DATA && overlayCtx && cropCtx) {
+            const vw = video.videoWidth;
+            const vh = video.videoHeight;
+
+            overlayCanvas.width = vw;
+            overlayCanvas.height = vh;
+            overlayCtx.clearRect(0, 0, vw, vh);
+
+            // Potong area fokus di tengah (ROI: 75% lebar x 55% tinggi)
+            // Mempercepat inferensi ~3-4x lipat dan mencegah salah baca objek pinggir layar
+            const roiW = Math.round(vw * 0.75);
+            const roiH = Math.round(vh * 0.55);
+            const roiX = Math.round((vw - roiW) / 2);
+            const roiY = Math.round((vh - roiH) / 2);
+
+            // Skala crop ke lebar maksimal 640px agar ZXing WASM bekerja sangat cepat & tajam
+            const targetW = Math.min(roiW, 640);
+            const scale = targetW / roiW;
+            const targetH = Math.round(roiH * scale);
+
+            cropCanvas.width = targetW;
+            cropCanvas.height = targetH;
+            cropCtx.drawImage(video, roiX, roiY, roiW, roiH, 0, 0, targetW, targetH);
 
             const t0 = performance.now();
             try {
-               const barcodes = await detector.detect(video);
+               const barcodes = await detector.detect(cropCanvas);
                const t1 = performance.now();
 
                if (barcodes.length > 0 && barcodes[0].rawValue) {
                   const code = barcodes[0];
-                  const { x, y, width, height } = code.boundingBox;
+                  const cleanValue = code.rawValue.trim();
 
-                  // Bounding box crisp indigo-emerald
-                  ctx.strokeStyle = "#5B5BD6";
-                  ctx.lineWidth = 3;
-                  ctx.strokeRect(x, y, width, height);
-
-                  if (code.cornerPoints) {
-                     ctx.fillStyle = "#FFFFFF";
-                     code.cornerPoints.forEach((pt: { x: number; y: number }) => {
-                        ctx.beginPath();
-                        ctx.arc(pt.x, pt.y, 5, 0, 2 * Math.PI);
-                        ctx.fill();
-                        ctx.strokeStyle = "#5B5BD6";
-                        ctx.lineWidth = 2;
-                        ctx.stroke();
-                     });
+                  // Konfirmasi konsistensi 2 frame berturut-turut untuk mencegah salah baca
+                  if (lastCandidateRef.current.value === cleanValue) {
+                     lastCandidateRef.current.count += 1;
+                  } else {
+                     lastCandidateRef.current = { value: cleanValue, count: 1 };
                   }
 
-                  setTelemetry({
-                     rawValue: code.rawValue,
-                     format: code.format.toUpperCase().replace("_", "-"),
-                     inferenceMs: (t1 - t0).toFixed(2),
-                     box: {
-                        x: Math.round(x),
-                        y: Math.round(y),
-                        width: Math.round(width),
-                        height: Math.round(height),
-                     },
-                     source: "CAMERA",
-                  });
+                  // Kembalikan koordinat bounding box dari cropCanvas ke koordinat asli video
+                  const boxX = Math.round(roiX + code.boundingBox.x / scale);
+                  const boxY = Math.round(roiY + code.boundingBox.y / scale);
+                  const boxW = Math.round(code.boundingBox.width / scale);
+                  const boxH = Math.round(code.boundingBox.height / scale);
 
-                  lookupDatabase(code.rawValue);
-                  isLockedRef.current = true;
-                  setIsLocked(true);
-                  return;
+                  // Gambar Bounding Box
+                  overlayCtx.strokeStyle = lastCandidateRef.current.count >= 2 ? "#10B981" : "#F59E0B";
+                  overlayCtx.lineWidth = 4;
+                  overlayCtx.strokeRect(boxX, boxY, boxW, boxH);
+
+                  // Kunci hanya jika sudah terverifikasi 2 frame identik
+                  if (lastCandidateRef.current.count >= 2) {
+                     setTelemetry({
+                        rawValue: cleanValue,
+                        format: code.format.toUpperCase().replace("_", "-"),
+                        inferenceMs: (t1 - t0).toFixed(2),
+                        box: {
+                           x: boxX,
+                           y: boxY,
+                           width: boxW,
+                           height: boxH,
+                        },
+                        source: "CAMERA",
+                     });
+
+                     lookupDatabase(cleanValue);
+                     isLockedRef.current = true;
+                     setIsLocked(true);
+                     return;
+                  }
+               } else {
+                  lastCandidateRef.current = { value: "", count: 0 };
                }
             } catch {
                // Abaikan error frame tunggal
             }
          }
 
-         timerRef.current = setTimeout(scanFrame, 150);
+         // Interval 80ms (~12.5 FPS) karena ROI sudah ringan
+         timerRef.current = setTimeout(scanFrame, 80);
       };
 
       scanFrame();
@@ -234,7 +302,7 @@ export default function BarcodeCVLab() {
    return (
       <div className="min-h-screen bg-[#F6F7F9] text-[#181920] p-4 sm:p-6 md:p-8 font-sans antialiased">
          <div className="max-w-6xl mx-auto space-y-6">
-            {/* Top Navigation Bar (Ref: Floating Pill + Brand + Status) */}
+            {/* Top Navigation Bar */}
             <header className="flex flex-col md:flex-row items-center justify-between gap-4">
                <div className="flex items-center gap-3 self-start md:self-auto">
                   <div className="w-10 h-10 rounded-xl bg-[#5B5BD6] flex items-center justify-center text-white shadow-sm">
@@ -263,7 +331,7 @@ export default function BarcodeCVLab() {
                <div className="hidden md:flex items-center gap-2.5">
                   <span className="px-3 py-1.5 bg-white border border-slate-200/90 rounded-full text-xs font-medium text-slate-600 flex items-center gap-1.5">
                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                     {engineMode}
+                     {engineMode} &bull; ROI 2-Pass
                   </span>
                </div>
             </header>
@@ -272,14 +340,29 @@ export default function BarcodeCVLab() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-1">
                <div>
                   <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-[#181920]">Pemindaian Inventaris</h1>
-                  <p className="text-xs sm:text-sm text-slate-500 mt-0.5">Deteksi barcode secara lokal di browser dan cocokkan stok tanpa latensi server.</p>
+                  <p className="text-xs sm:text-sm text-slate-500 mt-0.5">Arahkan barcode ke dalam kotak bidik di tengah kamera untuk verifikasi otomatis.</p>
                </div>
 
-               <div className="flex items-center gap-2.5">
+               <div className="flex items-center gap-2.5 flex-wrap">
+                  {/* Format Mode Selector */}
+                  <div className="flex items-center bg-white border border-slate-200 rounded-full p-1">
+                     {(
+                        [
+                           { id: "1D_PRODUCT", label: "Barcode 1D" },
+                           { id: "QR_ONLY", label: "QR Code" },
+                           { id: "ALL", label: "Semua" },
+                        ] as { id: ScanProfile; label: string }[]
+                     ).map(mode => (
+                        <button key={mode.id} onClick={() => setScanProfile(mode.id)} className={`px-3 py-1.5 rounded-full text-[11px] font-semibold transition ${scanProfile === mode.id ? "bg-[#1E1F29] text-white" : "text-slate-600 hover:text-[#181920]"}`}>
+                           {mode.label}
+                        </button>
+                     ))}
+                  </div>
+
                   {telemetry && (
                      <button onClick={resetScan} className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-full text-xs font-semibold flex items-center gap-1.5 transition">
                         <RotateCcw className="w-3.5 h-3.5" />
-                        Reset Hasil
+                        Reset
                      </button>
                   )}
                   {!isScanning ? (
@@ -303,7 +386,7 @@ export default function BarcodeCVLab() {
                </div>
             )}
 
-            {/* 4-Column Metric Cards (Ref: Top Summary Cards) */}
+            {/* 4-Column Metric Cards */}
             <section className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4">
                <div className="bg-white border border-slate-200/80 rounded-2xl p-4 sm:p-5 flex flex-col justify-between">
                   <div className="flex items-center justify-between text-slate-500">
@@ -314,7 +397,7 @@ export default function BarcodeCVLab() {
                   </div>
                   <div className="mt-3">
                      <div className="text-xl sm:text-2xl font-bold text-[#181920]">{isLocked ? "Terkunci" : isScanning ? "Aktif" : "Siaga"}</div>
-                     <div className="text-[11px] text-slate-500 mt-1">{isLocked ? "1 kode berhasil dibaca" : isScanning ? "Mencari pola di frame" : "Kamera belum menyala"}</div>
+                     <div className="text-[11px] text-slate-500 mt-1">{isLocked ? "Terverifikasi 2 frame" : isScanning ? "Memindai area ROI tengah" : "Kamera belum menyala"}</div>
                   </div>
                </div>
 
@@ -327,7 +410,7 @@ export default function BarcodeCVLab() {
                   </div>
                   <div className="mt-3">
                      <div className="text-xl sm:text-2xl font-bold text-[#181920]">{telemetry ? `${telemetry.inferenceMs} ms` : "0.00 ms"}</div>
-                     <div className="text-[11px] text-emerald-600 font-medium mt-1">Pemrosesan lokal 100%</div>
+                     <div className="text-[11px] text-emerald-600 font-medium mt-1">ROI Crop &amp; Downscale</div>
                   </div>
                </div>
 
@@ -340,7 +423,7 @@ export default function BarcodeCVLab() {
                   </div>
                   <div className="mt-3">
                      <div className="text-xl sm:text-2xl font-bold text-[#181920]">{telemetry ? telemetry.format : "—"}</div>
-                     <div className="text-[11px] text-slate-500 mt-1">EAN-13, Code-128, QR</div>
+                     <div className="text-[11px] text-slate-500 mt-1">Mode: {scanProfile === "1D_PRODUCT" ? "Barcode 1D" : scanProfile === "QR_ONLY" ? "QR Code" : "Semua"}</div>
                   </div>
                </div>
 
@@ -358,7 +441,7 @@ export default function BarcodeCVLab() {
                </div>
             </section>
 
-            {/* Filter / Quick Simulation Strip (Ref: Filter Bar above main dark container) */}
+            {/* Quick Simulation Strip */}
             <section className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs font-semibold text-slate-700 mr-1">Uji Cepat Tanpa Kamera:</span>
@@ -378,7 +461,7 @@ export default function BarcodeCVLab() {
                </div>
             </section>
 
-            {/* TAB 1: SCANNER WORKSPACE (Ref: Dark Container + Indigo Detail Card) */}
+            {/* TAB 1: SCANNER WORKSPACE */}
             {activeTab === "scanner" && (
                <section className="bg-[#1E1F29] rounded-[28px] p-4 sm:p-6 text-white shadow-sm">
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
@@ -389,10 +472,19 @@ export default function BarcodeCVLab() {
                            <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium ${isLocked ? "bg-emerald-500/20 text-emerald-300" : isScanning ? "bg-[#5B5BD6]/30 text-indigo-200" : "bg-white/10 text-slate-300"}`}>{isLocked ? "Terkunci" : isScanning ? "Memindai..." : "Standby"}</span>
                         </div>
 
-                        {/* Camera Frame */}
+                        {/* Camera Frame with Target ROI Reticle */}
                         <div className="relative w-full aspect-video bg-[#14151C] rounded-2xl overflow-hidden border border-white/10 flex items-center justify-center">
                            <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
                            <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+
+                           {/* Target Guide Box (ROI 75% x 55%) */}
+                           {isScanning && !isLocked && (
+                              <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                                 <div className="w-[75%] h-[55%] border-2 border-dashed border-white/60 rounded-xl relative flex items-end justify-center pb-2">
+                                    <span className="px-2 py-0.5 bg-black/60 rounded text-[10px] text-white/90">Posisikan barcode di dalam kotak</span>
+                                 </div>
+                              </div>
+                           )}
 
                            {!isScanning && (
                               <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
@@ -414,7 +506,7 @@ export default function BarcodeCVLab() {
                            )}
                         </div>
 
-                        {/* Compact Item List (Ref: Left stacked list in reference image) */}
+                        {/* Compact Item List */}
                         <div className="space-y-2 pt-1">
                            <div className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Daftar Kode Terdaftar</div>
                            <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
@@ -434,12 +526,11 @@ export default function BarcodeCVLab() {
                         </div>
                      </div>
 
-                     {/* Right Column: Indigo Inspection Detail Card (Ref: Right Periwinkle Card) */}
+                     {/* Right Column: Indigo Inspection Detail Card */}
                      <div className="lg:col-span-7 bg-[#5B5BD6] rounded-2xl p-5 sm:p-6 flex flex-col justify-between text-white">
                         {telemetry ? (
                            <>
                               <div>
-                                 {/* Top Metadata Header */}
                                  <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-white/15">
                                     <div>
                                        <div className="text-xs text-indigo-200 font-medium">Kode Terdeteksi</div>
@@ -455,7 +546,6 @@ export default function BarcodeCVLab() {
                                     </div>
                                  </div>
 
-                                 {/* Product Detail or Unregistered Notice */}
                                  {matchedProduct ? (
                                     <div className="py-5 space-y-5">
                                        <div>
@@ -466,7 +556,6 @@ export default function BarcodeCVLab() {
                                           </div>
                                        </div>
 
-                                       {/* 3 Sub-cards inside Indigo Card (Ref: 3 translucent boxes in reference) */}
                                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                           <div className="bg-white/15 rounded-xl p-3.5 flex flex-col justify-between">
                                              <div className="flex items-center justify-between text-indigo-100">
@@ -511,7 +600,6 @@ export default function BarcodeCVLab() {
                                  )}
                               </div>
 
-                              {/* Bottom Action Footer inside Indigo Card */}
                               <div className="pt-4 border-t border-white/15 flex flex-wrap items-center justify-between gap-3">
                                  <div className="text-xs text-indigo-100">
                                     Format: <span className="font-mono font-semibold text-white">{telemetry.format}</span> &bull; Inferensi: <span className="font-mono font-semibold text-white">{telemetry.inferenceMs} ms</span>
@@ -522,13 +610,12 @@ export default function BarcodeCVLab() {
                               </div>
                            </>
                         ) : (
-                           /* Empty State inside Indigo Card */
                            <div className="h-full min-h-[280px] flex flex-col items-center justify-center text-center p-6 space-y-3">
                               <div className="w-12 h-12 rounded-2xl bg-white/15 flex items-center justify-center">
                                  <ScanBarcode className="w-6 h-6 text-white" />
                               </div>
                               <div className="text-lg font-bold">Menunggu Input Barcode</div>
-                              <p className="text-xs text-indigo-100 max-w-sm leading-relaxed">Arahkan kamera ke barcode produk (EAN-13, Code-128, atau QR Code), atau pilih salah satu kode dari daftar di sebelah kiri untuk melihat detail inventaris.</p>
+                              <p className="text-xs text-indigo-100 max-w-sm leading-relaxed">Sejajarkan garis barcode secara horizontal di dalam kotak bidik kamera, atau pilih salah satu kode dari daftar di sebelah kiri.</p>
                            </div>
                         )}
                      </div>
@@ -596,29 +683,27 @@ export default function BarcodeCVLab() {
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                      <div className="p-4 rounded-2xl bg-[#F6F7F9] border border-slate-200/60 space-y-2">
-                        <div className="text-xs font-bold text-[#5B5BD6]">01. Aktifkan Akses Kamera</div>
+                        <div className="text-xs font-bold text-[#5B5BD6]">01. Pilih Jenis Kode</div>
                         <p className="text-xs text-slate-600 leading-relaxed">
-                           Tekan tombol <strong>Aktifkan Kamera</strong> di kanan atas dan berikan izin kamera pada browser. Pastikan halaman dibuka melalui <code>localhost</code> atau protokol <code>HTTPS</code>.
+                           Gunakan filter <strong>Barcode 1D</strong> untuk kode batang barang (EAN-13, Code-128) atau <strong>QR Code</strong> agar pembacaan jauh lebih cepat dan bebas salah tebak.
                         </p>
                      </div>
 
                      <div className="p-4 rounded-2xl bg-[#F6F7F9] border border-slate-200/60 space-y-2">
-                        <div className="text-xs font-bold text-[#5B5BD6]">02. Posisikan Barcode</div>
-                        <p className="text-xs text-slate-600 leading-relaxed">Arahkan barcode (EAN-13, EAN-8, Code-128, Code-39, UPC-A, atau QR) ke dalam area frame kamera dengan pencahayaan cukup agar fokus kamera terkunci.</p>
+                        <div className="text-xs font-bold text-[#5B5BD6]">02. Sejajarkan di Kotak Bidik</div>
+                        <p className="text-xs text-slate-600 leading-relaxed">Tempatkan barcode di dalam garis putus-putus tengah kamera. Sistem hanya memproses area fokus ini agar inferensi berlangsung di bawah 10 milidetik.</p>
                      </div>
 
                      <div className="p-4 rounded-2xl bg-[#F6F7F9] border border-slate-200/60 space-y-2">
-                        <div className="text-xs font-bold text-[#5B5BD6]">03. Penguncian Otomatis</div>
-                        <p className="text-xs text-slate-600 leading-relaxed">
-                           Saat kode terdeteksi, sistem otomatis mengunci hasil agar data tidak berubah-ubah. Tekan <strong>Scan Berikutnya</strong> atau <strong>Reset Hasil</strong> untuk memindai barang lain.
-                        </p>
+                        <div className="text-xs font-bold text-[#5B5BD6]">03. Verifikasi 2 Frame Otomatis</div>
+                        <p className="text-xs text-slate-600 leading-relaxed">Sistem memastikan 2 frame berturut-turut menghasilkan angka identik sebelum mengunci hasil, mencegah pembacaan meleset akibat pantulan cahaya.</p>
                      </div>
                   </div>
 
                   <div className="p-4 rounded-2xl bg-indigo-50/70 border border-indigo-100 flex items-start gap-3">
                      <CheckCircle2 className="w-4 h-4 text-[#5B5BD6] shrink-0 mt-0.5" />
                      <p className="text-xs text-slate-700 leading-relaxed">
-                        <strong>Pengujian Tanpa Kamera Fisik:</strong> Anda dapat menggunakan tombol kode pada bilah <em>Uji Cepat Tanpa Kamera</em> atau membuka situs generator barcode online di perangkat lain lalu memindainya menggunakan kamera ini.
+                        <strong>Tips Jarak &amp; Pencahayaan:</strong> Jaga jarak sekitar 15–25 cm dari lensa. Jika memindai dari layar monitor/HP lain, turunkan sedikit kecerahan layar sumber agar garis barcode tidak pecah terkena pantulan piksel.
                      </p>
                   </div>
                </section>
