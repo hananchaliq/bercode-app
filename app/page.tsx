@@ -245,6 +245,8 @@ function BarcodeCanvas({ value, format = "code128", scale = 3, height = 13, comp
    );
 }
 
+
+
 export default function BarcodeCVLab() {
    const videoRef = useRef<HTMLVideoElement | null>(null);
    const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -263,6 +265,7 @@ export default function BarcodeCVLab() {
    const [matchedProduct, setMatchedProduct] = useState<ProductItem | null>(null);
    const [errorMsg, setErrorMsg] = useState<string>("");
    const [searchQuery, setSearchQuery] = useState<string>("");
+   const [mobileVisibleCount, setMobileVisibleCount] = useState<number>(10);
 
    const [genInput, setGenInput] = useState<string>("8992761136014");
    const [genFormat, setGenFormat] = useState<GeneratorFormat>("ean13");
@@ -577,7 +580,7 @@ export default function BarcodeCVLab() {
             )}
 
             {/* ACTIVE TAB WORKSPACE (Selalu paling atas di HP via order-first lg:order-none) */}
-            <div className="order-first lg:order-none">
+            <div className="order-none">
                {/* TAB 1: SCANNER WORKSPACE */}
                {activeTab === "scanner" && (
                   <section className="bg-[#1E1F29] rounded-3xl sm:rounded-[28px] p-3.5 sm:p-6 text-white shadow-sm">
@@ -774,7 +777,16 @@ export default function BarcodeCVLab() {
 
                            <div className="space-y-1.5">
                               <label className="text-xs font-semibold text-slate-700">Nilai / Teks Barcode</label>
-                              <input type="text" value={genInput} onChange={e => setGenInput(e.target.value)} placeholder="Masukkan angka atau kode..." className="w-full px-4 py-2.5 bg-[#F6F7F9] border border-slate-200 rounded-xl text-sm font-mono text-[#181920] focus:outline-none focus:border-[#5B5BD6]" />
+                              <input
+                                 type="text"
+                                 value={searchQuery}
+                                 onChange={e => {
+                                    setSearchQuery(e.target.value);
+                                    setMobileVisibleCount(10);
+                                 }}
+                                 placeholder="Cari kode / produk..."
+                                 className="w-full pl-9 pr-3.5 py-1.5 bg-white border border-slate-200 rounded-full text-xs text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-[#5B5BD6]"
+                              />
                               <p className="text-[11px] text-slate-500">{genFormat === "ean13" ? "*EAN-13 membutuhkan tepat 13 digit angka valid (contoh: 8992761136014)." : "*Code-128 & QR mendukung huruf, angka, dan tanda hubung (contoh: INV-2026-001)."}</p>
                            </div>
 
@@ -810,33 +822,50 @@ export default function BarcodeCVLab() {
                         </div>
                      </div>
 
-                     {/* MOBILE VIEW (< md): Compact Cards — NO TABLE */}
-                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:hidden">
-                        {filteredProducts.map(item => (
-                           <div key={item.barcode} className="p-3.5 rounded-2xl bg-[#F6F7F9] border border-slate-200/80 flex flex-col justify-between space-y-3">
-                              <div className="flex items-start justify-between gap-2">
-                                 <div>
-                                    <span className="text-[11px] font-medium text-slate-500">{item.category}</span>
-                                    <h3 className="text-sm font-bold text-[#181920] leading-snug">{item.name}</h3>
+                     {/* MOBILE VIEW (< md): 2-Column Compact Cards (Max 10 initial = 5 rows) */}
+                     <div className="md:hidden space-y-3">
+                        <div className="grid grid-cols-2 gap-2.5">
+                           {filteredProducts.slice(0, mobileVisibleCount).map(item => (
+                              <div key={item.barcode} className="p-2.5 rounded-2xl bg-[#F6F7F9] border border-slate-200/80 flex flex-col justify-between space-y-2">
+                                 <div className="space-y-1">
+                                    <div className="flex items-center justify-between gap-1">
+                                       <span className="text-[10px] font-medium text-slate-500 truncate">{item.category}</span>
+                                       <span className={`shrink-0 px-1.5 py-0.5 rounded-full text-[9px] font-semibold ${item.stock === 0 ? "bg-red-100 text-red-700" : item.stock <= 5 ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-700"}`}>{item.stock} unit</span>
+                                    </div>
+                                    <h3 className="text-xs font-bold text-[#181920] leading-snug line-clamp-2 min-h-[2rem]">{item.name}</h3>
                                  </div>
-                                 <span className={`shrink-0 px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${item.stock === 0 ? "bg-red-100 text-red-700" : item.stock <= 5 ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-700"}`}>{item.stock} unit</span>
-                              </div>
 
-                              <div className="flex justify-center py-1">
-                                 <BarcodeCanvas value={item.barcode} format={isValidEan13(item.barcode) ? "ean13" : "code128"} scale={2} height={9} compact />
-                              </div>
-
-                              <div className="pt-2.5 border-t border-slate-200/80 flex items-center justify-between">
-                                 <div>
-                                    <div className="text-[10px] text-slate-500">Harga Satuan</div>
-                                    <div className="text-xs font-bold text-[#181920]">Rp {item.price.toLocaleString("id-ID")}</div>
+                                 <div className="flex justify-center py-0.5 overflow-hidden">
+                                    <BarcodeCanvas value={item.barcode} format={isValidEan13(item.barcode) ? "ean13" : "code128"} scale={1.3} height={7} compact />
                                  </div>
-                                 <button onClick={() => simulateScan(item.barcode)} className="px-3.5 py-1.5 bg-[#1E1F29] hover:bg-[#5B5BD6] text-white rounded-full text-xs font-semibold transition">
-                                    Uji Scan
+
+                                 <div className="pt-2 border-t border-slate-200/80 flex items-center justify-between gap-1">
+                                    <div className="min-w-0">
+                                       <div className="text-[9px] text-slate-500">Harga</div>
+                                       <div className="text-[11px] font-bold text-[#181920] truncate">Rp {item.price.toLocaleString("id-ID")}</div>
+                                    </div>
+                                    <button onClick={() => simulateScan(item.barcode)} className="shrink-0 px-2.5 py-1 bg-[#1E1F29] hover:bg-[#5B5BD6] text-white rounded-full text-[10px] font-semibold transition">
+                                       Scan
+                                    </button>
+                                 </div>
+                              </div>
+                           ))}
+                        </div>
+
+                        {/* Tombol Pagination / Load More */}
+                        {filteredProducts.length > 10 && (
+                           <div className="flex justify-center pt-1">
+                              {mobileVisibleCount < filteredProducts.length ? (
+                                 <button type="button" onClick={() => setMobileVisibleCount(prev => prev + 10)} className="w-full py-2.5 bg-[#F6F7F9] hover:bg-slate-200/70 border border-slate-200 rounded-xl text-xs font-semibold text-[#181920] transition">
+                                    Tampilkan Lainnya ({filteredProducts.length - mobileVisibleCount} produk tersisa)
                                  </button>
-                              </div>
+                              ) : (
+                                 <button type="button" onClick={() => setMobileVisibleCount(10)} className="w-full py-2.5 bg-[#F6F7F9] hover:bg-slate-200/70 border border-slate-200 rounded-xl text-xs font-semibold text-slate-600 transition">
+                                    Tampilkan Lebih Sedikit (10 Produk)
+                                 </button>
+                              )}
                            </div>
-                        ))}
+                        )}
                      </div>
 
                      {/* DESKTOP VIEW (>= md): Structured Table */}
