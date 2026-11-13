@@ -245,8 +245,6 @@ function BarcodeCanvas({ value, format = "code128", scale = 3, height = 13, comp
    );
 }
 
-
-
 export default function BarcodeCVLab() {
    const videoRef = useRef<HTMLVideoElement | null>(null);
    const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -627,7 +625,7 @@ export default function BarcodeCVLab() {
                            {/* Compact Item List */}
                            <div className="space-y-2 pt-1">
                               <div className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Daftar Kode Terdaftar</div>
-                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-1.5 max-h-44 overflow-y-auto pr-1">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-1.5 max-h-44 overflow-y-auto pr-1 py-2 [mask-image:linear-gradient(to_bottom,transparent_0%,black_10%,black_90%,transparent_100%)] [-webkit-mask-image:linear-gradient(to_bottom,transparent_0%,black_10%,black_90%,transparent_100%)]">
                                  {filteredProducts.map(item => {
                                     const active = telemetry?.rawValue === item.barcode;
                                     return (
