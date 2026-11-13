@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { BarcodeDetector } from "barcode-detector/ponyfill";
-import bwipjs from "bwip-js";
+import bwipjs from "bwip-js/browser";
 import { Camera, CameraOff, ScanBarcode, RotateCcw, CheckCircle2, AlertCircle, Package, Cpu, Clock, Layers, BookOpen, ArrowUpRight, Search, Download, QrCode } from "lucide-react";
 
 interface ProductItem {
