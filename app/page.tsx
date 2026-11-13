@@ -57,10 +57,12 @@ const DUMMY_DATABASE: Record<string, ProductItem> = {
 export default function BarcodeCVLab() {
    const videoRef = useRef<HTMLVideoElement | null>(null);
    const canvasRef = useRef<HTMLCanvasElement | null>(null);
-   const animationRef = useRef<number | null>(null);
+   const timerRef = useRef<NodeJS.Timeout | null>(null);
+   const isLockedRef = useRef<boolean>(false);
 
    const [engineMode, setEngineMode] = useState<string>("Mendeteksi...");
    const [isScanning, setIsScanning] = useState<boolean>(false);
+   const [isLocked, setIsLocked] = useState<boolean>(false);
    const [telemetry, setTelemetry] = useState<ScanTelemetry | null>(null);
    const [matchedProduct, setMatchedProduct] = useState<ProductItem | null>(null);
    const [errorMsg, setErrorMsg] = useState<string>("");
@@ -70,7 +72,7 @@ export default function BarcodeCVLab() {
       setEngineMode(hasNative ? "Native ML Kit API" : "ZXing WASM Polyfill");
 
       return () => {
-         if (animationRef.current) cancelAnimationFrame(animationRef.current);
+         if (timerRef.current) clearTimeout(timerRef.current);
       };
    }, []);
 
@@ -80,6 +82,8 @@ export default function BarcodeCVLab() {
    };
 
    const simulateScan = (code: string) => {
+      isLockedRef.current = true;
+      setIsLocked(true);
       setTelemetry({
          rawValue: code,
          format: code.startsWith("899") ? "EAN_13 (SIMULATED)" : "CODE_128 (SIMULATED)",
@@ -87,6 +91,24 @@ export default function BarcodeCVLab() {
          box: { x: 120, y: 80, width: 320, height: 140 },
       });
       lookupDatabase(code);
+   };
+
+   const resetScan = () => {
+      isLockedRef.current = false;
+      setIsLocked(false);
+      setTelemetry(null);
+      setMatchedProduct(null);
+
+      // Bersihkan canvas bounding box
+      if (canvasRef.current) {
+         const ctx = canvasRef.current.getContext("2d");
+         ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+      }
+
+      // Lanjutkan loop deteksi jika kamera masih aktif
+      if (isScanning) {
+         detectLoop();
+      }
    };
 
    const startCamera = async () => {
@@ -99,6 +121,8 @@ export default function BarcodeCVLab() {
             videoRef.current.srcObject = stream;
             await videoRef.current.play();
             setIsScanning(true);
+            isLockedRef.current = false;
+            setIsLocked(false);
             detectLoop();
          }
       } catch {
@@ -116,7 +140,10 @@ export default function BarcodeCVLab() {
          formats: ["ean_13", "ean_8", "code_128", "code_39", "qr_code", "upc_a"],
       });
 
-      const renderFrame = async () => {
+      const scanFrame = async () => {
+         // Berhenti memindai jika hasil sudah terkunci
+         if (isLockedRef.current) return;
+
          if (video.readyState === video.HAVE_ENOUGH_DATA && ctx) {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
@@ -127,7 +154,8 @@ export default function BarcodeCVLab() {
                const barcodes = await detector.detect(video);
                const t1 = performance.now();
 
-               if (barcodes.length > 0) {
+               // Hanya proses jika BENAR-BENAR ada barcode terdeteksi di kamera
+               if (barcodes.length > 0 && barcodes[0].rawValue) {
                   const code = barcodes[0];
                   const { x, y, width, height } = code.boundingBox;
 
@@ -159,15 +187,22 @@ export default function BarcodeCVLab() {
                   });
 
                   lookupDatabase(code.rawValue);
+
+                  // Kunci hasil agar tidak terus men-scan ulang setelah ketemu
+                  isLockedRef.current = true;
+                  setIsLocked(true);
+                  return;
                }
             } catch {
                // Abaikan error frame tunggal
             }
          }
-         animationRef.current = requestAnimationFrame(renderFrame);
+
+         // Cek setiap 150ms (~6-7 FPS) agar CPU adem & tidak spam loop
+         timerRef.current = setTimeout(scanFrame, 150);
       };
 
-      renderFrame();
+      scanFrame();
    };
 
    return (
@@ -187,9 +222,22 @@ export default function BarcodeCVLab() {
             <div className="relative w-full aspect-video bg-slate-900 rounded-lg overflow-hidden border border-slate-800 flex items-center justify-center">
                <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
                <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+
                {!isScanning && (
                   <button onClick={startCamera} className="absolute px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-md shadow">
                      Aktifkan Kamera &amp; Vision Engine
+                  </button>
+               )}
+
+               {isScanning && (
+                  <div className="absolute top-3 left-3 flex items-center gap-2">
+                     <span className={`px-2.5 py-1 rounded text-[11px] font-mono font-semibold ${isLocked ? "bg-emerald-950/90 text-emerald-300 border border-emerald-500/50" : "bg-slate-950/80 text-amber-300 border border-amber-500/40"}`}>{isLocked ? "LOCKED: KODE TERDETEKSI" : "MENCARI BARCODE..."}</span>
+                  </div>
+               )}
+
+               {isLocked && (
+                  <button onClick={resetScan} className="absolute bottom-3 right-3 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white text-xs font-medium rounded-md shadow">
+                     Scan Ulang
                   </button>
                )}
             </div>
@@ -204,12 +252,19 @@ export default function BarcodeCVLab() {
                      </button>
                   ))}
                </div>
-               <p className="text-[11px] text-slate-500">*Tips: Kamu juga bisa mengklik kode di atas untuk menguji alur pembacaan database tanpa menyalakan kamera.</p>
             </section>
 
             {/* Hasil Pencocokan Database Lokal */}
             <section className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-2">
-               <div className="text-xs uppercase tracking-wider font-semibold text-slate-400">Hasil Lookup Database Lokal</div>
+               <div className="flex justify-between items-center">
+                  <span className="text-xs uppercase tracking-wider font-semibold text-slate-400">Hasil Lookup Database Lokal</span>
+                  {telemetry && (
+                     <button onClick={resetScan} className="text-xs text-slate-400 hover:text-white underline">
+                        Reset
+                     </button>
+                  )}
+               </div>
+
                {telemetry ? (
                   matchedProduct ? (
                      <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-md p-3 space-y-1.5 text-xs">
@@ -235,7 +290,7 @@ export default function BarcodeCVLab() {
                      </div>
                   )
                ) : (
-                  <p className="text-xs text-slate-500 italic">Menunggu input dari pemindaian kamera atau tombol simulasi...</p>
+                  <p className="text-xs text-slate-500 italic">Arahkan barcode ke kamera untuk memindai...</p>
                )}
             </section>
 
